@@ -159,6 +159,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.ledBlinker.evaluateActivity()
             self.updateMenuBarStatus()
         }
+
+        midiManager.onTempoReset = { [weak self] in
+            self?.clearKnownTempo()
+        }
     }
 
     private func observeSettings() {
@@ -229,6 +233,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         updateMenuBarStatus()
     }
 
+    /// Temp becomes unknown (e.g. host preset change). Stop blinking until the user taps again.
+    private func clearKnownTempo() {
+        activityMonitor.noteActivity()
+        tapEngine.reset()
+        tempoState.currentBPM = nil
+        settingsStore.lastBPM = nil
+        ledBlinker.setBPM(nil)
+        ledBlinker.stop(turnOff: true)
+        updateMenuBarStatus()
+    }
+
     func nudgeBPM(by delta: Double) {
         tempoState.adjustBPM(by: delta, minBPM: settingsStore.minBPM, maxBPM: settingsStore.maxBPM)
         if let bpm = tempoState.currentBPM {
@@ -259,8 +274,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             button.title = warning ? "⚠ —" : "—"
         }
 
-        button.appearsDisabled = !active || warning
-        button.alphaValue = (!active || warning) ? 0.45 : 1.0
+        // Mild dim only — appearsDisabled + low alpha made the icon nearly invisible.
+        button.appearsDisabled = false
+        button.alphaValue = (!active || warning) ? 0.78 : 1.0
 
         if let bpmItem = statusItem?.menu?.item(withTag: 100) {
             if let bpm {

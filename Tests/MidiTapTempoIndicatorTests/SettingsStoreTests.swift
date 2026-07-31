@@ -88,6 +88,40 @@ final class SettingsStoreTests: XCTestCase {
         store.useSameDeviceForInputAndOutput(sources: sources, destinations: destinations)
         XCTAssertEqual(store.selectedDestinationUniqueID, 99)
     }
+
+    func testPersistsMultipleTempoResets() {
+        let store = SettingsStore(defaults: defaults)
+        XCTAssertTrue(store.tempoResets.isEmpty)
+        store.addTempoReset()
+        store.addTempoReset()
+        store.updateTempoReset(MIDIMapping(id: store.tempoResets[0].id, kind: .controlChange, note: 58, velocity: 127, channel: 0))
+        store.updateTempoReset(MIDIMapping(id: store.tempoResets[1].id, kind: .controlChange, note: 59, velocity: 127, channel: 0))
+
+        let reloaded = SettingsStore(defaults: defaults)
+        XCTAssertEqual(reloaded.tempoResets.count, 2)
+        XCTAssertEqual(reloaded.tempoResets.map(\.note), [58, 59])
+    }
+
+    func testImportSettingsWithoutTempoResetsDefaultsEmpty() throws {
+        let legacyJSON = """
+        {
+          "tapInput": {"id":"00000000-0000-4000-8000-000000000046","kind":"controlChange","note":46,"velocity":127,"channel":0},
+          "ledOutputs": [{"id":"00000000-0000-4000-8000-000000000046","kind":"controlChange","note":46,"velocity":127,"channel":0}],
+          "blinkEnabled": true,
+          "minBPM": 40,
+          "maxBPM": 240,
+          "controllerIdleTimeout": 5,
+          "ledOnValue": 127,
+          "ledOffValue": 0,
+          "beatSubdivision": "quarter"
+        }
+        """.data(using: .utf8)!
+
+        let store = SettingsStore(defaults: defaults)
+        store.addTempoReset()
+        try store.importSettingsData(legacyJSON)
+        XCTAssertTrue(store.tempoResets.isEmpty)
+    }
 }
 
 final class MIDIMappingTests: XCTestCase {

@@ -142,6 +142,7 @@ struct SettingsView: View {
         switch midiManager.learningTarget {
         case .tapInput: return "Listening for Tap Tempo"
         case .ledOutput: return "Listening for LED Output"
+        case .tempoReset: return "Listening for Tempo Reset"
         case nil: return "Listening"
         }
     }
@@ -309,7 +310,7 @@ struct SettingsView: View {
             VStack(alignment: .leading, spacing: 18) {
                 settingsCard(title: "Mapping Guide") {
                     VStack(alignment: .leading, spacing: 8) {
-                        supportingText("Learn the tap button separately from LED outputs. Presses (value > 0) update BPM; releases are ignored. Other apps still receive hardware messages directly.")
+                        supportingText("Learn the tap button separately from LED outputs. Tempo reset bindings clear the known BPM (for preset prev/next) so LEDs don’t keep blinking a stale tempo. Presses (value > 0) count; releases are ignored.")
                         if let message = midiManager.lastLearnedMessage {
                             supportingText(message)
                         }
@@ -360,6 +361,41 @@ struct SettingsView: View {
                         }
                     }
                 }
+
+                settingsCard(title: "Tempo Reset") {
+                    VStack(alignment: .leading, spacing: 14) {
+                        HStack {
+                            supportingText("When any of these fire, BPM becomes unknown and LED blink stops until you tap again. Use for preset prev/next or similar.")
+                            Spacer()
+                            Button("Add Binding") {
+                                settingsStore.addTempoReset()
+                            }
+                            .disabled(settingsStore.tempoResets.count >= SettingsStore.tempoResetLimit)
+                        }
+
+                        if settingsStore.tempoResets.isEmpty {
+                            supportingText("No tempo-reset bindings yet.")
+                        } else {
+                            MappingHeaderRow()
+                            ForEach(settingsStore.tempoResets) { reset in
+                                MappingEditorRow(
+                                    mapping: tempoResetBinding(for: reset.id),
+                                    defaultMapping: MIDIMapping(kind: .controlChange, note: 0, velocity: 127, channel: 0),
+                                    isLearning: {
+                                        if case let .tempoReset(id) = midiManager.learningTarget {
+                                            return id == reset.id
+                                        }
+                                        return false
+                                    }(),
+                                    canRemove: true,
+                                    onLearn: { midiManager.beginLearning(.tempoReset(reset.id)) },
+                                    onCancelLearn: { midiManager.cancelLearning() },
+                                    onRemove: { settingsStore.removeTempoReset(id: reset.id) }
+                                )
+                            }
+                        }
+                    }
+                }
             }
             .padding(.vertical, 4)
         }
@@ -372,6 +408,16 @@ struct SettingsView: View {
                     ?? MIDIMapping(kind: .controlChange, note: 0, velocity: 1)
             },
             set: { settingsStore.updateLEDOutput($0) }
+        )
+    }
+
+    private func tempoResetBinding(for id: UUID) -> Binding<MIDIMapping> {
+        Binding(
+            get: {
+                settingsStore.tempoResets.first(where: { $0.id == id })
+                    ?? MIDIMapping(kind: .controlChange, note: 0, velocity: 1)
+            },
+            set: { settingsStore.updateTempoReset($0) }
         )
     }
 

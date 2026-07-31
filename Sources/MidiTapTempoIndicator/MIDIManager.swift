@@ -17,6 +17,7 @@ final class MIDIManager: ObservableObject {
 
     var onControllerActivity: (() -> Void)?
     var onTapPress: (() -> Void)?
+    var onTempoReset: (() -> Void)?
 
     var isLearning: Bool { learningTarget != nil }
 
@@ -105,6 +106,8 @@ final class MIDIManager: ObservableObject {
             lastLearnedMessage = "Press the tap tempo button on your controller…"
         case .ledOutput:
             lastLearnedMessage = "Press the control whose LED should blink…"
+        case .tempoReset:
+            lastLearnedMessage = "Press a control that changes patch/preset (tempo becomes unknown)…"
         }
     }
 
@@ -310,6 +313,11 @@ final class MIDIManager: ObservableObject {
             return
         }
 
+        if matchesTempoReset(kind: .noteOn, number: note, value: velocity, channel: channel) {
+            onTempoReset?()
+            return
+        }
+
         if settingsStore.tapInput.matchesPress(kind: .noteOn, number: note, value: velocity, channel: channel) {
             onTapPress?()
         }
@@ -323,8 +331,19 @@ final class MIDIManager: ObservableObject {
             return
         }
 
+        if matchesTempoReset(kind: .controlChange, number: controller, value: value, channel: channel) {
+            onTempoReset?()
+            return
+        }
+
         if settingsStore.tapInput.matchesPress(kind: .controlChange, number: controller, value: value, channel: channel) {
             onTapPress?()
+        }
+    }
+
+    private func matchesTempoReset(kind: MIDIMessageKind, number: UInt8, value: UInt8, channel: UInt8) -> Bool {
+        settingsStore.tempoResets.contains {
+            $0.matchesPress(kind: kind, number: number, value: value, channel: channel)
         }
     }
 
@@ -338,6 +357,11 @@ final class MIDIManager: ObservableObject {
             updated.id = id
             settingsStore.updateLEDOutput(updated)
             lastLearnedMessage = "Learned LED \(mapping.summaryLabel), value \(mapping.velocity)"
+        case let .tempoReset(id):
+            var updated = mapping
+            updated.id = id
+            settingsStore.updateTempoReset(updated)
+            lastLearnedMessage = "Learned tempo reset \(mapping.summaryLabel), value \(mapping.velocity)"
         }
         learningTarget = nil
     }

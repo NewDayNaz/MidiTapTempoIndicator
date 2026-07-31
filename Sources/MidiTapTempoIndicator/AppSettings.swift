@@ -17,6 +17,7 @@ struct SettingsSnapshot: Codable, Equatable {
     var selectedDestinationUniqueID: Int32?
     var tapInput: MIDIMapping
     var ledOutputs: [MIDIMapping]
+    var tempoResets: [MIDIMapping]
     var blinkEnabled: Bool
     var minBPM: Double
     var maxBPM: Double
@@ -25,6 +26,60 @@ struct SettingsSnapshot: Codable, Equatable {
     var ledOffValue: Int
     var beatSubdivision: BeatSubdivision
     var lastBPM: Double?
+
+    enum CodingKeys: String, CodingKey {
+        case selectedSourceUniqueID, selectedDestinationUniqueID
+        case tapInput, ledOutputs, tempoResets
+        case blinkEnabled, minBPM, maxBPM, controllerIdleTimeout
+        case ledOnValue, ledOffValue, beatSubdivision, lastBPM
+    }
+
+    init(
+        selectedSourceUniqueID: Int32?,
+        selectedDestinationUniqueID: Int32?,
+        tapInput: MIDIMapping,
+        ledOutputs: [MIDIMapping],
+        tempoResets: [MIDIMapping],
+        blinkEnabled: Bool,
+        minBPM: Double,
+        maxBPM: Double,
+        controllerIdleTimeout: Double,
+        ledOnValue: Int,
+        ledOffValue: Int,
+        beatSubdivision: BeatSubdivision,
+        lastBPM: Double?
+    ) {
+        self.selectedSourceUniqueID = selectedSourceUniqueID
+        self.selectedDestinationUniqueID = selectedDestinationUniqueID
+        self.tapInput = tapInput
+        self.ledOutputs = ledOutputs
+        self.tempoResets = tempoResets
+        self.blinkEnabled = blinkEnabled
+        self.minBPM = minBPM
+        self.maxBPM = maxBPM
+        self.controllerIdleTimeout = controllerIdleTimeout
+        self.ledOnValue = ledOnValue
+        self.ledOffValue = ledOffValue
+        self.beatSubdivision = beatSubdivision
+        self.lastBPM = lastBPM
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        selectedSourceUniqueID = try container.decodeIfPresent(Int32.self, forKey: .selectedSourceUniqueID)
+        selectedDestinationUniqueID = try container.decodeIfPresent(Int32.self, forKey: .selectedDestinationUniqueID)
+        tapInput = try container.decode(MIDIMapping.self, forKey: .tapInput)
+        ledOutputs = try container.decode([MIDIMapping].self, forKey: .ledOutputs)
+        tempoResets = try container.decodeIfPresent([MIDIMapping].self, forKey: .tempoResets) ?? []
+        blinkEnabled = try container.decode(Bool.self, forKey: .blinkEnabled)
+        minBPM = try container.decode(Double.self, forKey: .minBPM)
+        maxBPM = try container.decode(Double.self, forKey: .maxBPM)
+        controllerIdleTimeout = try container.decode(Double.self, forKey: .controllerIdleTimeout)
+        ledOnValue = try container.decode(Int.self, forKey: .ledOnValue)
+        ledOffValue = try container.decode(Int.self, forKey: .ledOffValue)
+        beatSubdivision = try container.decode(BeatSubdivision.self, forKey: .beatSubdivision)
+        lastBPM = try container.decodeIfPresent(Double.self, forKey: .lastBPM)
+    }
 }
 
 final class SettingsStore: ObservableObject {
@@ -33,6 +88,7 @@ final class SettingsStore: ObservableObject {
     static let controllerIdleTimeoutRange = 1.0...60.0
     static let midiValueRange = 0...127
     static let ledOutputLimit = 8
+    static let tempoResetLimit = 8
     static let defaultControllerIdleTimeout = 5.0
     static let defaultMinBPM = 40.0
     static let defaultMaxBPM = 240.0
@@ -45,6 +101,7 @@ final class SettingsStore: ObservableObject {
         static let tapMapping = "tapMapping"
         static let tapInput = "tapInput"
         static let ledOutputs = "ledOutputs"
+        static let tempoResets = "tempoResets"
         static let blinkEnabled = "blinkEnabled"
         static let minBPM = "minBPM"
         static let maxBPM = "maxBPM"
@@ -77,6 +134,17 @@ final class SettingsStore: ObservableObject {
             }
             if ledOutputs.count > Self.ledOutputLimit {
                 ledOutputs = Array(ledOutputs.prefix(Self.ledOutputLimit))
+                return
+            }
+            save()
+        }
+    }
+
+    /// Controls that clear known tempo (e.g. preset prev/next) so LEDs don't blink a stale BPM.
+    @Published var tempoResets: [MIDIMapping] {
+        didSet {
+            if tempoResets.count > Self.tempoResetLimit {
+                tempoResets = Array(tempoResets.prefix(Self.tempoResetLimit))
                 return
             }
             save()
@@ -208,6 +276,13 @@ final class SettingsStore: ObservableObject {
         tapInput = migrated.tapInput
         ledOutputs = migrated.ledOutputs
 
+        if let resetData = defaults.data(forKey: Keys.tempoResets),
+           let decoded = try? JSONDecoder().decode([MIDIMapping].self, from: resetData) {
+            tempoResets = Array(decoded.prefix(Self.tempoResetLimit))
+        } else {
+            tempoResets = []
+        }
+
         if defaults.object(forKey: Keys.blinkEnabled) != nil {
             blinkEnabled = defaults.bool(forKey: Keys.blinkEnabled)
         } else {
@@ -287,6 +362,20 @@ final class SettingsStore: ObservableObject {
         ledOutputs[index] = mapping
     }
 
+    func addTempoReset() {
+        guard tempoResets.count < Self.tempoResetLimit else { return }
+        tempoResets.append(MIDIMapping(kind: .controlChange, note: 0, velocity: 127, channel: 0))
+    }
+
+    func removeTempoReset(id: UUID) {
+        tempoResets.removeAll { $0.id == id }
+    }
+
+    func updateTempoReset(_ mapping: MIDIMapping) {
+        guard let index = tempoResets.firstIndex(where: { $0.id == mapping.id }) else { return }
+        tempoResets[index] = mapping
+    }
+
     func useSameDeviceForInputAndOutput(sources: [MIDIEndpointInfo], destinations: [MIDIEndpointInfo]) {
         guard let sourceID = selectedSourceUniqueID,
               let source = sources.first(where: { $0.uniqueID == sourceID }) else { return }
@@ -307,6 +396,7 @@ final class SettingsStore: ObservableObject {
             selectedDestinationUniqueID: selectedDestinationUniqueID,
             tapInput: tapInput,
             ledOutputs: ledOutputs,
+            tempoResets: tempoResets,
             blinkEnabled: blinkEnabled,
             minBPM: minBPM,
             maxBPM: maxBPM,
@@ -333,6 +423,7 @@ final class SettingsStore: ObservableObject {
         selectedDestinationUniqueID = snapshot.selectedDestinationUniqueID
         tapInput = snapshot.tapInput
         ledOutputs = snapshot.ledOutputs.isEmpty ? [snapshot.tapInput] : Array(snapshot.ledOutputs.prefix(Self.ledOutputLimit))
+        tempoResets = Array(snapshot.tempoResets.prefix(Self.tempoResetLimit))
         blinkEnabled = snapshot.blinkEnabled
         minBPM = Self.clampBPM(snapshot.minBPM)
         maxBPM = max(Self.clampBPM(snapshot.maxBPM), minBPM)
@@ -415,6 +506,9 @@ final class SettingsStore: ObservableObject {
         }
         if let data = try? JSONEncoder().encode(ledOutputs) {
             defaults.set(data, forKey: Keys.ledOutputs)
+        }
+        if let data = try? JSONEncoder().encode(tempoResets) {
+            defaults.set(data, forKey: Keys.tempoResets)
         }
 
         defaults.set(blinkEnabled, forKey: Keys.blinkEnabled)

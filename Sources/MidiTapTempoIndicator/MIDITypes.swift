@@ -81,4 +81,5 @@ struct MIDIEndpointInfo: Identifiable, Hashable {
 enum LearnTarget: Equatable {
     case tapInput
     case ledOutput(UUID)
+    case tempoReset(UUID)
 }
