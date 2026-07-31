@@ -69,7 +69,8 @@ final class SettingsStoreTests: XCTestCase {
 
         let data = try store.exportSettingsData()
 
-        let otherDefaults = UserDefaults(suiteName: "MidiTapTempoIndicatorTests.import.\(UUID().uuidString)")!
+        let otherSuiteName = "MidiTapTempoIndicatorTests.import.\(UUID().uuidString)"
+        let otherDefaults = UserDefaults(suiteName: otherSuiteName)!
         let other = SettingsStore(defaults: otherDefaults)
         try other.importSettingsData(data)
 
@@ -77,7 +78,7 @@ final class SettingsStoreTests: XCTestCase {
         XCTAssertEqual(other.beatSubdivision, .eighth)
         XCTAssertEqual(other.tapInput.note, 50)
         XCTAssertEqual(other.tapInput.channel, 1)
-        otherDefaults.removePersistentDomain(forName: otherDefaults.suiteName!)
+        otherDefaults.removePersistentDomain(forName: otherSuiteName)
     }
 
     func testUseSameDeviceMatchesByName() {
