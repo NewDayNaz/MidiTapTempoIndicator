@@ -14,6 +14,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private(set) lazy var midiManager = MIDIManager(settingsStore: settingsStore)
     private let ledBlinker = LEDBlinker()
     private var tapEngine = TapTempoEngine()
+    /// Mirrors LED blink phase for menu-bar BPM coloring.
+    private var blinkPhaseLit = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -127,6 +129,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ledBlinker.onSendLED = { [weak self] value in
             self?.midiManager.sendLEDValue(value)
         }
+        ledBlinker.onPhaseChange = { [weak self] lit in
+            guard let self else { return }
+            self.blinkPhaseLit = lit
+            self.updateMenuBarStatus()
+        }
         applyBlinkerConfiguration()
     }
 
@@ -239,6 +246,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         tapEngine.reset()
         tempoState.currentBPM = nil
         settingsStore.lastBPM = nil
+        blinkPhaseLit = false
         ledBlinker.setBPM(nil)
         ledBlinker.stop(turnOff: true)
         updateMenuBarStatus()
@@ -266,17 +274,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let warning = midiManager.deviceWarningMessage != nil
         let active = activityMonitor.isActive
         let bpm = tempoState.currentBPM
+        let pulsing = active && !warning && bpm != nil && settingsStore.blinkEnabled
 
+        let text: String
         if let bpm {
             let prefix = warning ? "⚠ " : ""
-            button.title = String(format: "%@%.1f", prefix, bpm)
+            text = String(format: "%@%.1f", prefix, bpm)
         } else {
-            button.title = warning ? "⚠ —" : "—"
+            text = warning ? "⚠ —" : "—"
         }
 
-        // Mild dim only — appearsDisabled + low alpha made the icon nearly invisible.
+        let color: NSColor
+        if warning {
+            color = .systemOrange
+        } else if pulsing, blinkPhaseLit {
+            color = .controlAccentColor
+        } else if active, bpm != nil {
+            color = .labelColor
+        } else {
+            color = .secondaryLabelColor
+        }
+
+        let font = NSFont.menuBarFont(ofSize: 0)
+        button.attributedTitle = NSAttributedString(
+            string: text,
+            attributes: [
+                .foregroundColor: color,
+                .font: font,
+            ]
+        )
+
+        // Mild dim when idle; on the beat, fully opaque for a clear pulse.
         button.appearsDisabled = false
-        button.alphaValue = (!active || warning) ? 0.78 : 1.0
+        if !active || warning {
+            button.alphaValue = 0.78
+        } else if pulsing {
+            button.alphaValue = blinkPhaseLit ? 1.0 : 0.88
+        } else {
+            button.alphaValue = 1.0
+        }
 
         if let bpmItem = statusItem?.menu?.item(withTag: 100) {
             if let bpm {

@@ -20,6 +20,7 @@ struct SettingsView: View {
 
     @State private var selectedTab: Tab = .general
     @State private var transferMessage: TransferMessage?
+    @AppStorage("midiMonitorDrawerExpanded") private var monitorExpanded = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -57,6 +58,11 @@ struct SettingsView: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+
+            MIDIMonitorDrawer(
+                monitor: midiManager.monitor,
+                isExpanded: $monitorExpanded
+            )
         }
         .padding(20)
         .frame(minWidth: 760, minHeight: 640)
@@ -540,6 +546,110 @@ struct SettingsView: View {
                 message: error.localizedDescription,
                 tone: .warning
             )
+        }
+    }
+}
+
+private struct MIDIMonitorDrawer: View {
+    @ObservedObject var monitor: MIDIMonitor
+    @Binding var isExpanded: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 8) {
+                Button {
+                    withAnimation(.easeInOut(duration: 0.15)) {
+                        isExpanded.toggle()
+                    }
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: "chevron.right")
+                            .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                        Text("MIDI Monitor")
+                            .font(.headline)
+                        Text("\(monitor.entries.count)")
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Color.secondary.opacity(0.12), in: Capsule())
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+
+                Spacer()
+
+                if isExpanded {
+                    Button("Clear") {
+                        monitor.clear()
+                    }
+                    .buttonStyle(.borderless)
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+
+            if isExpanded {
+                Divider()
+                if monitor.entries.isEmpty {
+                    Text("Incoming MIDI from the selected input will appear here. Useful while Learning mappings.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .padding(14)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                } else {
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 0) {
+                            ForEach(monitor.entries) { entry in
+                                HStack(alignment: .firstTextBaseline, spacing: 10) {
+                                    Text(entry.timeLabel)
+                                        .font(.caption.monospacedDigit())
+                                        .foregroundStyle(.secondary)
+                                        .frame(width: 88, alignment: .leading)
+                                    Text(entry.kind.label)
+                                        .font(.caption.weight(.semibold).monospaced())
+                                        .foregroundStyle(kindColor(entry.kind))
+                                        .frame(width: 52, alignment: .leading)
+                                    Text(entry.summary)
+                                        .font(.caption.monospacedDigit())
+                                        .lineLimit(2)
+                                    Spacer(minLength: 0)
+                                }
+                                .padding(.horizontal, 14)
+                                .padding(.vertical, 5)
+                                .background(rowBackground(entry.kind))
+                            }
+                        }
+                    }
+                    .frame(height: 180)
+                }
+            }
+        }
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+    }
+
+    private func kindColor(_ kind: MIDIMonitorEntry.Kind) -> Color {
+        switch kind {
+        case .inbound: return .secondary
+        case .echoIgnored: return .orange
+        case .outbound: return .blue
+        case .tap: return .accentColor
+        case .tempoReset: return .orange
+        case .learned: return .green
+        }
+    }
+
+    private func rowBackground(_ kind: MIDIMonitorEntry.Kind) -> Color {
+        switch kind {
+        case .learned, .tap:
+            return Color.accentColor.opacity(0.06)
+        case .tempoReset, .echoIgnored:
+            return Color.orange.opacity(0.06)
+        default:
+            return .clear
         }
     }
 }

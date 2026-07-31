@@ -15,6 +15,8 @@ final class MIDIManager: ObservableObject {
     @Published var lastLearnedMessage: String?
     @Published private(set) var lastReceivedMessage: String?
 
+    let monitor = MIDIMonitor()
+
     var onControllerActivity: (() -> Void)?
     var onTapPress: (() -> Void)?
     var onTempoReset: (() -> Void)?
@@ -283,19 +285,31 @@ final class MIDIManager: ObservableObject {
     }
 
     private func handleMessages(_ messages: [MIDIParsedMessage]) {
-        let filtered = messages.filter { message in
+        var accepted: [MIDIParsedMessage] = []
+        for message in messages {
+            let summary = Self.summary(for: message)
             switch message {
             case let .controlChange(channel, controller, value):
-                return !echoFilter.shouldIgnore(channel: channel, controller: controller, value: value)
+                if echoFilter.shouldIgnore(channel: channel, controller: controller, value: value) {
+                    monitor.append(kind: .echoIgnored, summary: summary)
+                } else {
+                    monitor.append(kind: .inbound, summary: summary)
+                    accepted.append(message)
+                }
             case let .noteOn(channel, note, velocity):
-                return !echoFilter.shouldIgnoreNote(channel: channel, note: note, velocity: velocity)
+                if echoFilter.shouldIgnoreNote(channel: channel, note: note, velocity: velocity) {
+                    monitor.append(kind: .echoIgnored, summary: summary)
+                } else {
+                    monitor.append(kind: .inbound, summary: summary)
+                    accepted.append(message)
+                }
             }
         }
-        guard !filtered.isEmpty else { return }
+        guard !accepted.isEmpty else { return }
 
         onControllerActivity?()
 
-        for message in filtered {
+        for message in accepted {
             switch message {
             case let .noteOn(channel, note, velocity):
                 handleNoteOn(channel: channel, note: note, velocity: velocity)
@@ -306,38 +320,56 @@ final class MIDIManager: ObservableObject {
     }
 
     private func handleNoteOn(channel: UInt8, note: UInt8, velocity: UInt8) {
-        lastReceivedMessage = "Note \(note) (\(MIDIMapping(kind: .noteOn, note: note, velocity: velocity, channel: channel).noteLabel)) ch\(Int(channel) + 1), value \(velocity)"
+        let summary = Self.summary(for: .noteOn(channel: channel, note: note, velocity: velocity))
+        lastReceivedMessage = summary
 
         if let learningTarget, velocity > 0 {
             applyLearned(MIDIMapping(kind: .noteOn, note: note, velocity: velocity, channel: channel), to: learningTarget)
+            monitor.append(kind: .learned, summary: summary)
             return
         }
 
         if matchesTempoReset(kind: .noteOn, number: note, value: velocity, channel: channel) {
+            monitor.append(kind: .tempoReset, summary: summary)
             onTempoReset?()
             return
         }
 
         if settingsStore.tapInput.matchesPress(kind: .noteOn, number: note, value: velocity, channel: channel) {
+            monitor.append(kind: .tap, summary: summary)
             onTapPress?()
         }
     }
 
     private func handleControlChange(channel: UInt8, controller: UInt8, value: UInt8) {
-        lastReceivedMessage = "CC \(controller) ch\(Int(channel) + 1), value \(value)"
+        let summary = Self.summary(for: .controlChange(channel: channel, controller: controller, value: value))
+        lastReceivedMessage = summary
 
         if let learningTarget, value > 0 {
             applyLearned(MIDIMapping(kind: .controlChange, note: controller, velocity: value, channel: channel), to: learningTarget)
+            monitor.append(kind: .learned, summary: summary)
             return
         }
 
         if matchesTempoReset(kind: .controlChange, number: controller, value: value, channel: channel) {
+            monitor.append(kind: .tempoReset, summary: summary)
             onTempoReset?()
             return
         }
 
         if settingsStore.tapInput.matchesPress(kind: .controlChange, number: controller, value: value, channel: channel) {
+            monitor.append(kind: .tap, summary: summary)
             onTapPress?()
+        }
+    }
+
+    private static func summary(for message: MIDIParsedMessage) -> String {
+        switch message {
+        case let .noteOn(channel, note, velocity):
+            let label = MIDIMapping(kind: .noteOn, note: note, velocity: velocity, channel: channel).noteLabel
+            return "Note \(note) (\(label)) ch\(Int(channel) + 1), value \(velocity)"
+        case let .controlChange(channel, controller, value):
+            return "CC \(controller) ch\(Int(channel) + 1), value \(value)"
         }
     }
 

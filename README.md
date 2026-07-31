@@ -4,11 +4,12 @@ A macOS menu bar app that listens for MIDI tap-tempo presses, tracks BPM interna
 
 ## Features
 
-- **Menu bar BPM** — live tempo in the status item; dimmed when idle, warning when a selected device drops
+- **Menu bar BPM** — live tempo in the status item; pulses with the LED blink for at-a-glance tempo, dimmed when idle, warning when a device drops
 - **Shared controller** — other apps can keep using the same MIDI device
 - **Channel-aware Learn** — capture tap input, LED outputs, and tempo-reset controls (CC/note + channel)
 - **Multiple LED outputs** — blink several LEDs, or use different CCs for tap-in vs LED-out
 - **Tempo reset bindings** — preset prev/next (or any controls) clear known BPM so LEDs don’t stay on a stale tempo
+- **MIDI monitor drawer** — rolling log of recent input (and Learn/tap/reset tags) for mapping debug
 - **Echo filtering** — ignores LED feedback loops if the device echoes outbound CCs
 - **Beat subdivisions** — quarter, eighth, or downbeat-only flash
 - **BPM nudge / slider** — fine-tune when tap is close but not exact

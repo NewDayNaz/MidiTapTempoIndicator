@@ -2,6 +2,8 @@ import Foundation
 
 final class LEDBlinker {
     var onSendLED: ((UInt8) -> Void)?
+    /// Called on the main queue whenever the blink phase changes (`true` = LED on / beat).
+    var onPhaseChange: ((Bool) -> Void)?
     var isControllerActive: (() -> Bool)?
 
     private var bpm: Double?
@@ -76,7 +78,6 @@ final class LEDBlinker {
             self.queue.asyncAfter(deadline: .now() + finishDelay) { [weak self] in
                 guard let self else { return }
                 self.sendLocked(self.ledOffValue)
-                self.isLit = false
                 self.restartTimerLocked()
             }
         }
@@ -85,7 +86,6 @@ final class LEDBlinker {
     private func restartTimerLocked() {
         stopLocked(turnOff: false)
         beatCounter = 0
-        isLit = false
 
         guard enabled,
               let bpm,
@@ -93,7 +93,6 @@ final class LEDBlinker {
               isControllerActive?() ?? false else {
             if enabled == false || bpm == nil {
                 sendLocked(ledOffValue)
-                isLit = false
             }
             return
         }
@@ -121,8 +120,8 @@ final class LEDBlinker {
 
         switch subdivision {
         case .quarter, .eighth:
-            isLit.toggle()
-            sendLocked(isLit ? ledOnValue : ledOffValue)
+            let nextLit = !isLit
+            sendLocked(nextLit ? ledOnValue : ledOffValue)
         case .downbeat:
             // One short on-pulse at the start of each 4-beat bar; off for the other beats.
             if beatCounter % 4 == 0 {
@@ -143,14 +142,23 @@ final class LEDBlinker {
         timer = nil
         if turnOff {
             sendLocked(ledOffValue)
-            isLit = false
             beatCounter = 0
         }
     }
 
     private func sendLocked(_ value: UInt8) {
+        let lit: Bool
+        if ledOnValue == ledOffValue {
+            lit = value > 0
+        } else {
+            lit = value == ledOnValue
+        }
+        isLit = lit
+
         DispatchQueue.main.async { [weak self] in
-            self?.onSendLED?(value)
+            guard let self else { return }
+            self.onSendLED?(value)
+            self.onPhaseChange?(lit)
         }
     }
 }
