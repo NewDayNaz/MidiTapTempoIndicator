@@ -57,7 +57,7 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
           BUILD_NUMBER: ${{ steps.version.outputs.build_number }}
           SKIP_SIGN: "true"
-        run: ./scripts/build-app.sh
+        run: bash ./scripts/build-app.sh
 
       - name: Detect macOS build architecture
         id: build_arch

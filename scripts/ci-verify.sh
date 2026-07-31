@@ -20,9 +20,9 @@ echo "==> Running unit tests..."
 swift test
 
 echo "==> Building release app bundle..."
-./scripts/build-app.sh
+bash ./scripts/build-app.sh
 
 echo "==> Verifying app bundle..."
-./scripts/verify-bundle.sh
+bash ./scripts/verify-bundle.sh
 
 echo "CI verification passed."
