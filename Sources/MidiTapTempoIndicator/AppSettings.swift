@@ -1,22 +1,50 @@
 import Combine
 import Foundation
 
+enum SettingsTransferError: LocalizedError {
+    case invalidFile
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidFile:
+            return "The selected file does not contain valid settings."
+        }
+    }
+}
+
+struct SettingsSnapshot: Codable, Equatable {
+    var selectedSourceUniqueID: Int32?
+    var selectedDestinationUniqueID: Int32?
+    var tapInput: MIDIMapping
+    var ledOutputs: [MIDIMapping]
+    var blinkEnabled: Bool
+    var minBPM: Double
+    var maxBPM: Double
+    var controllerIdleTimeout: Double
+    var ledOnValue: Int
+    var ledOffValue: Int
+    var beatSubdivision: BeatSubdivision
+    var lastBPM: Double?
+}
+
 final class SettingsStore: ObservableObject {
     static let bpmRange = 40.0...240.0
     /// Controller idle timeout in minutes.
     static let controllerIdleTimeoutRange = 1.0...60.0
     static let midiValueRange = 0...127
+    static let ledOutputLimit = 8
     static let defaultControllerIdleTimeout = 5.0
     static let defaultMinBPM = 40.0
     static let defaultMaxBPM = 240.0
     static let defaultLEDOnValue: UInt8 = 127
     static let defaultLEDOffValue: UInt8 = 0
-    static let defaultMIDIChannel: UInt8 = 0
 
     private enum Keys {
         static let selectedSourceUniqueID = "selectedSourceUniqueID"
         static let selectedDestinationUniqueID = "selectedDestinationUniqueID"
         static let tapMapping = "tapMapping"
+        static let tapInput = "tapInput"
+        static let ledOutputs = "ledOutputs"
         static let blinkEnabled = "blinkEnabled"
         static let minBPM = "minBPM"
         static let maxBPM = "maxBPM"
@@ -24,6 +52,9 @@ final class SettingsStore: ObservableObject {
         static let ledOnValue = "ledOnValue"
         static let ledOffValue = "ledOffValue"
         static let midiChannel = "midiChannel"
+        static let beatSubdivision = "beatSubdivision"
+        static let lastBPM = "lastBPM"
+        static let hasCompletedOnboarding = "hasCompletedOnboarding"
     }
 
     @Published var selectedSourceUniqueID: Int32? {
@@ -34,8 +65,22 @@ final class SettingsStore: ObservableObject {
         didSet { save() }
     }
 
-    @Published var tapMapping: MIDIMapping {
+    @Published var tapInput: MIDIMapping {
         didSet { save() }
+    }
+
+    @Published var ledOutputs: [MIDIMapping] {
+        didSet {
+            if ledOutputs.isEmpty {
+                ledOutputs = [tapInput]
+                return
+            }
+            if ledOutputs.count > Self.ledOutputLimit {
+                ledOutputs = Array(ledOutputs.prefix(Self.ledOutputLimit))
+                return
+            }
+            save()
+        }
     }
 
     @Published var blinkEnabled: Bool {
@@ -85,7 +130,6 @@ final class SettingsStore: ObservableObject {
         }
     }
 
-    /// Idle timeout as a `TimeInterval` in seconds for runtime use.
     var controllerIdleTimeoutSeconds: TimeInterval {
         controllerIdleTimeout * 60.0
     }
@@ -112,15 +156,25 @@ final class SettingsStore: ObservableObject {
         }
     }
 
-    @Published var midiChannel: Int {
+    @Published var beatSubdivision: BeatSubdivision {
+        didSet { save() }
+    }
+
+    @Published var lastBPM: Double? {
         didSet {
-            let clamped = min(15, max(0, midiChannel))
-            if clamped != midiChannel {
-                midiChannel = clamped
-                return
+            if let lastBPM {
+                let clamped = Self.clampBPM(lastBPM)
+                if clamped != lastBPM {
+                    self.lastBPM = clamped
+                    return
+                }
             }
             save()
         }
+    }
+
+    @Published var hasCompletedOnboarding: Bool {
+        didSet { save() }
     }
 
     @Published var launchAtLogin: Bool {
@@ -150,12 +204,9 @@ final class SettingsStore: ObservableObject {
             selectedDestinationUniqueID = nil
         }
 
-        if let data = defaults.data(forKey: Keys.tapMapping),
-           let decoded = try? JSONDecoder().decode(MIDIMapping.self, from: data) {
-            tapMapping = decoded
-        } else {
-            tapMapping = .default
-        }
+        let migrated = Self.loadMappings(from: defaults)
+        tapInput = migrated.tapInput
+        ledOutputs = migrated.ledOutputs
 
         if defaults.object(forKey: Keys.blinkEnabled) != nil {
             blinkEnabled = defaults.bool(forKey: Keys.blinkEnabled)
@@ -189,11 +240,20 @@ final class SettingsStore: ObservableObject {
             ledOffValue = Int(Self.defaultLEDOffValue)
         }
 
-        if defaults.object(forKey: Keys.midiChannel) != nil {
-            midiChannel = min(15, max(0, defaults.integer(forKey: Keys.midiChannel)))
+        if let raw = defaults.string(forKey: Keys.beatSubdivision),
+           let subdivision = BeatSubdivision(rawValue: raw) {
+            beatSubdivision = subdivision
         } else {
-            midiChannel = Int(Self.defaultMIDIChannel)
+            beatSubdivision = .quarter
         }
+
+        if defaults.object(forKey: Keys.lastBPM) != nil {
+            lastBPM = Self.clampBPM(defaults.double(forKey: Keys.lastBPM))
+        } else {
+            lastBPM = nil
+        }
+
+        hasCompletedOnboarding = defaults.bool(forKey: Keys.hasCompletedOnboarding)
 
         launchAtLogin = LaunchAtLogin.isEnabled
         launchAtLoginError = nil
@@ -206,8 +266,111 @@ final class SettingsStore: ObservableObject {
         isSyncingLaunchAtLogin = false
     }
 
-    func resetTapMappingToDefault() {
-        tapMapping = .default
+    func resetTapInputToDefault() {
+        tapInput = .default
+    }
+
+    func addLEDOutput() {
+        guard ledOutputs.count < Self.ledOutputLimit else { return }
+        var copy = tapInput
+        copy.id = UUID()
+        ledOutputs.append(copy)
+    }
+
+    func removeLEDOutput(id: UUID) {
+        guard ledOutputs.count > 1 else { return }
+        ledOutputs.removeAll { $0.id == id }
+    }
+
+    func updateLEDOutput(_ mapping: MIDIMapping) {
+        guard let index = ledOutputs.firstIndex(where: { $0.id == mapping.id }) else { return }
+        ledOutputs[index] = mapping
+    }
+
+    func useSameDeviceForInputAndOutput(sources: [MIDIEndpointInfo], destinations: [MIDIEndpointInfo]) {
+        guard let sourceID = selectedSourceUniqueID,
+              let source = sources.first(where: { $0.uniqueID == sourceID }) else { return }
+
+        if destinations.contains(where: { $0.uniqueID == sourceID }) {
+            selectedDestinationUniqueID = sourceID
+            return
+        }
+
+        if let match = destinations.first(where: { $0.name == source.name }) {
+            selectedDestinationUniqueID = match.uniqueID
+        }
+    }
+
+    func exportSettingsData() throws -> Data {
+        let snapshot = SettingsSnapshot(
+            selectedSourceUniqueID: selectedSourceUniqueID,
+            selectedDestinationUniqueID: selectedDestinationUniqueID,
+            tapInput: tapInput,
+            ledOutputs: ledOutputs,
+            blinkEnabled: blinkEnabled,
+            minBPM: minBPM,
+            maxBPM: maxBPM,
+            controllerIdleTimeout: controllerIdleTimeout,
+            ledOnValue: ledOnValue,
+            ledOffValue: ledOffValue,
+            beatSubdivision: beatSubdivision,
+            lastBPM: lastBPM
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        return try encoder.encode(snapshot)
+    }
+
+    func importSettingsData(_ data: Data) throws {
+        guard let snapshot = try? JSONDecoder().decode(SettingsSnapshot.self, from: data) else {
+            throw SettingsTransferError.invalidFile
+        }
+        apply(snapshot: snapshot)
+    }
+
+    private func apply(snapshot: SettingsSnapshot) {
+        selectedSourceUniqueID = snapshot.selectedSourceUniqueID
+        selectedDestinationUniqueID = snapshot.selectedDestinationUniqueID
+        tapInput = snapshot.tapInput
+        ledOutputs = snapshot.ledOutputs.isEmpty ? [snapshot.tapInput] : Array(snapshot.ledOutputs.prefix(Self.ledOutputLimit))
+        blinkEnabled = snapshot.blinkEnabled
+        minBPM = Self.clampBPM(snapshot.minBPM)
+        maxBPM = max(Self.clampBPM(snapshot.maxBPM), minBPM)
+        controllerIdleTimeout = min(
+            Self.controllerIdleTimeoutRange.upperBound,
+            max(Self.controllerIdleTimeoutRange.lowerBound, snapshot.controllerIdleTimeout)
+        )
+        ledOnValue = min(127, max(0, snapshot.ledOnValue))
+        ledOffValue = min(127, max(0, snapshot.ledOffValue))
+        beatSubdivision = snapshot.beatSubdivision
+        lastBPM = snapshot.lastBPM.map(Self.clampBPM)
+    }
+
+    private static func loadMappings(from defaults: UserDefaults) -> (tapInput: MIDIMapping, ledOutputs: [MIDIMapping]) {
+        if let data = defaults.data(forKey: Keys.tapInput),
+           let tap = try? JSONDecoder().decode(MIDIMapping.self, from: data) {
+            let outputs: [MIDIMapping]
+            if let outData = defaults.data(forKey: Keys.ledOutputs),
+               let decoded = try? JSONDecoder().decode([MIDIMapping].self, from: outData),
+               !decoded.isEmpty {
+                outputs = Array(decoded.prefix(ledOutputLimit))
+            } else {
+                outputs = [tap]
+            }
+            return (tap, outputs)
+        }
+
+        // Legacy single tapMapping → tap input + one LED out.
+        if let data = defaults.data(forKey: Keys.tapMapping),
+           let legacy = try? JSONDecoder().decode(MIDIMapping.self, from: data) {
+            var migrated = legacy
+            if defaults.object(forKey: Keys.midiChannel) != nil {
+                migrated.channel = UInt8(clamping: min(15, max(0, defaults.integer(forKey: Keys.midiChannel))))
+            }
+            return (migrated, [migrated])
+        }
+
+        return (.default, [.default])
     }
 
     private func updateLaunchAtLogin(enabled: Bool) {
@@ -230,7 +393,7 @@ final class SettingsStore: ObservableObject {
         }
     }
 
-    private static func clampBPM(_ value: Double) -> Double {
+    static func clampBPM(_ value: Double) -> Double {
         min(bpmRange.upperBound, max(bpmRange.lowerBound, value))
     }
 
@@ -247,8 +410,11 @@ final class SettingsStore: ObservableObject {
             defaults.removeObject(forKey: Keys.selectedDestinationUniqueID)
         }
 
-        if let data = try? JSONEncoder().encode(tapMapping) {
-            defaults.set(data, forKey: Keys.tapMapping)
+        if let data = try? JSONEncoder().encode(tapInput) {
+            defaults.set(data, forKey: Keys.tapInput)
+        }
+        if let data = try? JSONEncoder().encode(ledOutputs) {
+            defaults.set(data, forKey: Keys.ledOutputs)
         }
 
         defaults.set(blinkEnabled, forKey: Keys.blinkEnabled)
@@ -257,6 +423,13 @@ final class SettingsStore: ObservableObject {
         defaults.set(controllerIdleTimeout, forKey: Keys.controllerIdleTimeout)
         defaults.set(ledOnValue, forKey: Keys.ledOnValue)
         defaults.set(ledOffValue, forKey: Keys.ledOffValue)
-        defaults.set(midiChannel, forKey: Keys.midiChannel)
+        defaults.set(beatSubdivision.rawValue, forKey: Keys.beatSubdivision)
+        defaults.set(hasCompletedOnboarding, forKey: Keys.hasCompletedOnboarding)
+
+        if let lastBPM {
+            defaults.set(lastBPM, forKey: Keys.lastBPM)
+        } else {
+            defaults.removeObject(forKey: Keys.lastBPM)
+        }
     }
 }

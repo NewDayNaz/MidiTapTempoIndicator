@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct SettingsView: View {
     enum Tab: String, CaseIterable, Identifiable {
@@ -13,8 +14,12 @@ struct SettingsView: View {
     @ObservedObject var midiManager: MIDIManager
     @ObservedObject var activityMonitor: ControllerActivityMonitor
     @ObservedObject var tempoState: TempoState
+    var onNudgeBPM: (Double) -> Void
+    var onSetBPM: (Double) -> Void
+    var onTestBlink: () -> Void
 
     @State private var selectedTab: Tab = .general
+    @State private var transferMessage: TransferMessage?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -22,6 +27,18 @@ struct SettingsView: View {
 
             if midiManager.isLearning {
                 learnBanner
+            }
+
+            if let warning = midiManager.deviceWarningMessage {
+                InlineMessageCard(title: "Device warning", message: warning, tone: .warning)
+            }
+
+            if let transferMessage {
+                InlineMessageCard(
+                    title: transferMessage.title,
+                    message: transferMessage.message,
+                    tone: transferMessage.tone
+                )
             }
 
             Picker("Section", selection: $selectedTab) {
@@ -42,7 +59,7 @@ struct SettingsView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
         .padding(20)
-        .frame(minWidth: 700, minHeight: 600)
+        .frame(minWidth: 760, minHeight: 640)
         .onAppear {
             settingsStore.refreshLaunchAtLogin()
         }
@@ -50,11 +67,18 @@ struct SettingsView: View {
 
     private var header: some View {
         VStack(alignment: .leading, spacing: 12) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text("MIDI Tap Tempo Indicator")
-                    .font(.system(size: 24, weight: .semibold))
-                Text("Track tap tempo from your controller and blink its LED at the BPM you tap.")
-                    .foregroundStyle(.secondary)
+            HStack(alignment: .firstTextBaseline) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("MIDI Tap Tempo Indicator")
+                        .font(.system(size: 24, weight: .semibold))
+                    Text("Track tap tempo from your controller and blink its LED at the BPM you tap.")
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                HStack(spacing: 8) {
+                    Button("Import") { importSettings() }
+                    Button("Export") { exportSettings() }
+                }
             }
 
             LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 12), count: 4), spacing: 12) {
@@ -68,13 +92,13 @@ struct SettingsView: View {
                     title: "MIDI Input",
                     value: selectedSourceName,
                     detail: midiManager.inputConnectionStatus ?? "Choose an input to start listening.",
-                    tone: inputTone
+                    tone: midiManager.inputConnected ? .success : .warning
                 )
                 StatusCard(
                     title: "MIDI Output",
                     value: selectedDestinationName,
                     detail: midiManager.outputConnectionStatus ?? "Choose an output for LED control.",
-                    tone: outputTone
+                    tone: midiManager.outputConnected ? .success : .warning
                 )
                 StatusCard(
                     title: "Input Activity",
@@ -93,9 +117,9 @@ struct SettingsView: View {
                 .foregroundStyle(Color.accentColor)
 
             VStack(alignment: .leading, spacing: 2) {
-                Text("Listening for Tap Tempo")
+                Text(learnBannerTitle)
                     .font(.headline)
-                Text(midiManager.lastLearnedMessage ?? "Press the tap tempo button on your controller.")
+                Text(midiManager.lastLearnedMessage ?? "Send the next MIDI message to capture it.")
                     .foregroundStyle(.secondary)
             }
 
@@ -111,6 +135,14 @@ struct SettingsView: View {
         .overlay {
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .stroke(Color.accentColor.opacity(0.35), lineWidth: 1)
+        }
+    }
+
+    private var learnBannerTitle: String {
+        switch midiManager.learningTarget {
+        case .tapInput: return "Listening for Tap Tempo"
+        case .ledOutput: return "Listening for LED Output"
+        case nil: return "Listening"
         }
     }
 
@@ -158,28 +190,65 @@ struct SettingsView: View {
                             }
                         }
 
-                        if let setupError = midiManager.setupError {
-                            InlineMessageCard(
-                                title: "MIDI setup issue",
-                                message: setupError,
-                                tone: .warning
+                        Button("Use same device for input & output") {
+                            settingsStore.useSameDeviceForInputAndOutput(
+                                sources: midiManager.sources,
+                                destinations: midiManager.destinations
                             )
+                        }
+
+                        if let setupError = midiManager.setupError {
+                            InlineMessageCard(title: "MIDI setup issue", message: setupError, tone: .warning)
                         } else {
-                            if let inputStatus = midiManager.inputConnectionStatus {
-                                supportingText(inputStatus)
+                            if !midiManager.inputConnected, let status = midiManager.inputConnectionStatus {
+                                InlineMessageCard(title: "Input not connected", message: status, tone: .warning)
                             }
-                            if let outputStatus = midiManager.outputConnectionStatus {
-                                supportingText(outputStatus)
+                            if !midiManager.outputConnected, let status = midiManager.outputConnectionStatus {
+                                InlineMessageCard(title: "Output not connected", message: status, tone: .warning)
+                            }
+                            if midiManager.inputConnected, let status = midiManager.inputConnectionStatus {
+                                supportingText(status)
+                            }
+                            if midiManager.outputConnected, let status = midiManager.outputConnectionStatus {
+                                supportingText(status)
                             }
                         }
 
-                        supportingText("Other apps can keep using the same controller at the same time. Select it here for input (taps) and output (LED blink).")
+                        supportingText("Other apps can keep using the same controller at the same time.")
+                    }
+                }
+
+                settingsCard(title: "Tempo") {
+                    VStack(alignment: .leading, spacing: 16) {
+                        HStack {
+                            Text("Current BPM")
+                            Spacer()
+                            valuePill(bpmDisplay)
+                        }
+                        Slider(value: bpmSliderBinding, in: settingsStore.minBPM...settingsStore.maxBPM, step: 0.5)
+                        HStack {
+                            Button("−1") { onNudgeBPM(-1) }
+                            Button("+1") { onNudgeBPM(1) }
+                            Spacer()
+                            Button("Test Blink") { onTestBlink() }
+                        }
+                        supportingText("Nudge when tap is close, or drag the slider. Last BPM is remembered across launches.")
+
+                        Divider()
+
+                        Picker("Beat subdivision", selection: $settingsStore.beatSubdivision) {
+                            ForEach(BeatSubdivision.allCases) { subdivision in
+                                Text(subdivision.label).tag(subdivision)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                        supportingText(settingsStore.beatSubdivision.detail)
                     }
                 }
 
                 settingsCard(title: "Tempo & Blink") {
                     VStack(alignment: .leading, spacing: 16) {
-                        Toggle("Blink tap button LED", isOn: $settingsStore.blinkEnabled)
+                        Toggle("Blink LED outputs", isOn: $settingsStore.blinkEnabled)
 
                         VStack(alignment: .leading, spacing: 8) {
                             HStack {
@@ -192,7 +261,7 @@ struct SettingsView: View {
                                 in: SettingsStore.controllerIdleTimeoutRange,
                                 step: 1
                             )
-                            supportingText("Any use of the controller (knobs, faders, buttons) keeps the LED blinking. After this many minutes with no MIDI, the LED turns off.")
+                            supportingText("Any use of the controller keeps the LED blinking. After this many minutes with no MIDI, the LED turns off.")
                         }
 
                         Divider()
@@ -226,12 +295,7 @@ struct SettingsView: View {
                                 Spacer()
                                 MIDIValueStepper(value: $settingsStore.ledOffValue, range: 0...127)
                             }
-                            HStack {
-                                Text("MIDI channel")
-                                Spacer()
-                                MIDIValueStepper(value: $settingsStore.midiChannel, range: 0...15)
-                            }
-                            supportingText("Channel is zero-based (0 = MIDI channel 1). Many controllers drive button LEDs with the same CC number as the button, using 127 on and 0 off.")
+                            supportingText("Many controllers drive button LEDs with the same CC number as the button, using 127 on and 0 off. Channel is learned per mapping.")
                         }
                     }
                 }
@@ -245,23 +309,55 @@ struct SettingsView: View {
             VStack(alignment: .leading, spacing: 18) {
                 settingsCard(title: "Mapping Guide") {
                     VStack(alignment: .leading, spacing: 8) {
-                        supportingText("Learn the button used for tap tempo. Presses (value > 0) update BPM; releases are ignored. Other apps still receive the hardware message directly.")
+                        supportingText("Learn the tap button separately from LED outputs. Presses (value > 0) update BPM; releases are ignored. Other apps still receive hardware messages directly.")
                         if let message = midiManager.lastLearnedMessage {
                             supportingText(message)
                         }
                     }
                 }
 
-                settingsCard(title: "Tap Tempo") {
+                settingsCard(title: "Tap Input") {
                     VStack(alignment: .leading, spacing: 14) {
                         MappingHeaderRow()
                         MappingEditorRow(
-                            mapping: $settingsStore.tapMapping,
+                            mapping: $settingsStore.tapInput,
                             defaultMapping: .default,
-                            isLearning: midiManager.isLearning,
-                            onLearn: { midiManager.beginLearning() },
+                            isLearning: midiManager.learningTarget == .tapInput,
+                            onLearn: { midiManager.beginLearning(.tapInput) },
                             onCancelLearn: { midiManager.cancelLearning() }
                         )
+                    }
+                }
+
+                settingsCard(title: "LED Outputs") {
+                    VStack(alignment: .leading, spacing: 14) {
+                        HStack {
+                            supportingText("Blink one or more LEDs. Each row can use a different CC/note and channel.")
+                            Spacer()
+                            Button("Add LED") {
+                                settingsStore.addLEDOutput()
+                            }
+                            .disabled(settingsStore.ledOutputs.count >= SettingsStore.ledOutputLimit)
+                        }
+
+                        MappingHeaderRow()
+
+                        ForEach(settingsStore.ledOutputs) { output in
+                            MappingEditorRow(
+                                mapping: ledBinding(for: output.id),
+                                defaultMapping: settingsStore.tapInput,
+                                isLearning: {
+                                    if case let .ledOutput(id) = midiManager.learningTarget {
+                                        return id == output.id
+                                    }
+                                    return false
+                                }(),
+                                canRemove: settingsStore.ledOutputs.count > 1,
+                                onLearn: { midiManager.beginLearning(.ledOutput(output.id)) },
+                                onCancelLearn: { midiManager.cancelLearning() },
+                                onRemove: { settingsStore.removeLEDOutput(id: output.id) }
+                            )
+                        }
                     }
                 }
             }
@@ -269,10 +365,19 @@ struct SettingsView: View {
         }
     }
 
+    private func ledBinding(for id: UUID) -> Binding<MIDIMapping> {
+        Binding(
+            get: {
+                settingsStore.ledOutputs.first(where: { $0.id == id })
+                    ?? MIDIMapping(kind: .controlChange, note: 0, velocity: 1)
+            },
+            set: { settingsStore.updateLEDOutput($0) }
+        )
+    }
+
     private func settingsCard<Content: View>(title: String, @ViewBuilder content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text(title)
-                .font(.headline)
+            Text(title).font(.headline)
             content()
         }
         .padding(16)
@@ -303,6 +408,13 @@ struct SettingsView: View {
         return "—"
     }
 
+    private var bpmSliderBinding: Binding<Double> {
+        Binding(
+            get: { tempoState.currentBPM ?? settingsStore.lastBPM ?? 120 },
+            set: { onSetBPM($0) }
+        )
+    }
+
     private var selectedSourceName: String {
         if let selectedID = settingsStore.selectedSourceUniqueID,
            let source = midiManager.sources.first(where: { $0.uniqueID == selectedID }) {
@@ -319,24 +431,6 @@ struct SettingsView: View {
         return midiManager.destinations.isEmpty ? "No Device" : "Not Selected"
     }
 
-    private var inputTone: MessageTone {
-        if midiManager.setupError != nil { return .warning }
-        if let selectedID = settingsStore.selectedSourceUniqueID,
-           midiManager.sources.contains(where: { $0.uniqueID == selectedID }) {
-            return .success
-        }
-        return .neutral
-    }
-
-    private var outputTone: MessageTone {
-        if midiManager.setupError != nil { return .warning }
-        if let selectedID = settingsStore.selectedDestinationUniqueID,
-           midiManager.destinations.contains(where: { $0.uniqueID == selectedID }) {
-            return .success
-        }
-        return .neutral
-    }
-
     private var selectedSourceBinding: Binding<Int32?> {
         Binding(
             get: { settingsStore.selectedSourceUniqueID },
@@ -350,13 +444,62 @@ struct SettingsView: View {
             set: { settingsStore.selectedDestinationUniqueID = $0 }
         )
     }
+
+    private func importSettings() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = [.json]
+        panel.title = "Import Settings"
+
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        do {
+            let data = try Data(contentsOf: url)
+            try settingsStore.importSettingsData(data)
+            transferMessage = TransferMessage(
+                title: "Settings imported",
+                message: "Imported settings from \(url.lastPathComponent).",
+                tone: .success
+            )
+        } catch {
+            transferMessage = TransferMessage(
+                title: "Import failed",
+                message: error.localizedDescription,
+                tone: .warning
+            )
+        }
+    }
+
+    private func exportSettings() {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.json]
+        panel.nameFieldStringValue = "MidiTapTempoIndicatorSettings.json"
+        panel.title = "Export Settings"
+
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        do {
+            let data = try settingsStore.exportSettingsData()
+            try data.write(to: url, options: .atomic)
+            transferMessage = TransferMessage(
+                title: "Settings exported",
+                message: "Saved settings to \(url.lastPathComponent).",
+                tone: .success
+            )
+        } catch {
+            transferMessage = TransferMessage(
+                title: "Export failed",
+                message: error.localizedDescription,
+                tone: .warning
+            )
+        }
+    }
 }
 
 private enum MessageTone {
-    case neutral
-    case success
-    case warning
-    case accent
+    case neutral, success, warning, accent
 
     var color: Color {
         switch self {
@@ -377,6 +520,12 @@ private enum MessageTone {
     }
 }
 
+private struct TransferMessage {
+    let title: String
+    let message: String
+    let tone: MessageTone
+}
+
 private struct StatusCard: View {
     let title: String
     let value: String
@@ -386,13 +535,10 @@ private struct StatusCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
-                Text(title)
-                    .font(.headline)
+                Text(title).font(.headline)
                 Spacer()
-                Image(systemName: tone.iconName)
-                    .foregroundStyle(tone.color)
+                Image(systemName: tone.iconName).foregroundStyle(tone.color)
             }
-
             Text(value)
                 .font(.title3.weight(.semibold))
                 .lineLimit(2)
@@ -417,15 +563,12 @@ private struct InlineMessageCard: View {
             Image(systemName: tone.iconName)
                 .foregroundStyle(tone.color)
                 .font(.title3)
-
             VStack(alignment: .leading, spacing: 4) {
-                Text(title)
-                    .font(.headline)
+                Text(title).font(.headline)
                 Text(message)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
-
             Spacer(minLength: 0)
         }
         .padding(14)
@@ -434,26 +577,21 @@ private struct InlineMessageCard: View {
 }
 
 private enum MappingRowLayout {
-    static let typeColumnWidth: CGFloat = 120
-    static let noteColumnWidth: CGFloat = 170
-    static let valueColumnWidth: CGFloat = 84
-    static let columnSpacing: CGFloat = 12
+    static let typeColumnWidth: CGFloat = 110
+    static let noteColumnWidth: CGFloat = 150
+    static let valueColumnWidth: CGFloat = 72
+    static let channelColumnWidth: CGFloat = 72
+    static let columnSpacing: CGFloat = 10
 }
 
 private struct MappingHeaderRow: View {
     var body: some View {
         HStack(spacing: MappingRowLayout.columnSpacing) {
-            Text("Type")
-                .mappingColumnLabel()
-                .frame(width: MappingRowLayout.typeColumnWidth, alignment: .leading)
-            Text("Note / CC")
-                .mappingColumnLabel()
-                .frame(width: MappingRowLayout.noteColumnWidth, alignment: .leading)
-            Text("Value")
-                .mappingColumnLabel()
-                .frame(width: MappingRowLayout.valueColumnWidth, alignment: .leading)
-            Text("Actions")
-                .mappingColumnLabel()
+            Text("Type").mappingColumnLabel().frame(width: MappingRowLayout.typeColumnWidth, alignment: .leading)
+            Text("Note / CC").mappingColumnLabel().frame(width: MappingRowLayout.noteColumnWidth, alignment: .leading)
+            Text("Value").mappingColumnLabel().frame(width: MappingRowLayout.valueColumnWidth, alignment: .leading)
+            Text("Ch").mappingColumnLabel().frame(width: MappingRowLayout.channelColumnWidth, alignment: .leading)
+            Text("Actions").mappingColumnLabel()
             Spacer(minLength: 0)
         }
     }
@@ -463,8 +601,10 @@ private struct MappingEditorRow: View {
     @Binding var mapping: MIDIMapping
     let defaultMapping: MIDIMapping
     let isLearning: Bool
+    var canRemove: Bool = false
     let onLearn: () -> Void
     let onCancelLearn: () -> Void
+    var onRemove: (() -> Void)?
 
     var body: some View {
         HStack(spacing: MappingRowLayout.columnSpacing) {
@@ -487,6 +627,9 @@ private struct MappingEditorRow: View {
             MIDIValueStepper(value: velocityBinding, range: 0...127)
                 .frame(width: MappingRowLayout.valueColumnWidth, alignment: .leading)
 
+            MIDIValueStepper(value: channelBinding, range: 0...15)
+                .frame(width: MappingRowLayout.channelColumnWidth, alignment: .leading)
+
             HStack(spacing: 8) {
                 if isLearning {
                     Button("Cancel", action: onCancelLearn)
@@ -496,9 +639,14 @@ private struct MappingEditorRow: View {
                 }
 
                 Button("Reset") {
-                    mapping = defaultMapping
+                    var reset = defaultMapping
+                    reset.id = mapping.id
+                    mapping = reset
                 }
-                .disabled(mapping == defaultMapping)
+
+                if canRemove, let onRemove {
+                    Button("Remove", role: .destructive, action: onRemove)
+                }
             }
 
             Spacer(minLength: 0)
@@ -516,17 +664,15 @@ private struct MappingEditorRow: View {
     }
 
     private var noteBinding: Binding<Int> {
-        Binding(
-            get: { Int(mapping.note) },
-            set: { mapping.note = UInt8(clamping: $0) }
-        )
+        Binding(get: { Int(mapping.note) }, set: { mapping.note = UInt8(clamping: $0) })
     }
 
     private var velocityBinding: Binding<Int> {
-        Binding(
-            get: { Int(mapping.velocity) },
-            set: { mapping.velocity = UInt8(clamping: $0) }
-        )
+        Binding(get: { Int(mapping.velocity) }, set: { mapping.velocity = UInt8(clamping: $0) })
+    }
+
+    private var channelBinding: Binding<Int> {
+        Binding(get: { Int(mapping.channel) }, set: { mapping.channel = UInt8(clamping: min(15, max(0, $0))) })
     }
 }
 
@@ -545,17 +691,12 @@ private struct MIDIValueStepper: NSViewRepresentable {
     func makeNSView(context: Context) -> NSStackView {
         let field = makeField(coordinator: context.coordinator)
         let stepper = makeStepper(coordinator: context.coordinator)
-
         let stack = NSStackView(views: [field, stepper])
         stack.orientation = .horizontal
         stack.alignment = .centerY
         stack.spacing = 4
-        stack.setHuggingPriority(.required, for: .vertical)
-        stack.setContentHuggingPriority(.required, for: .vertical)
-
         context.coordinator.field = field
         context.coordinator.stepper = stepper
-
         sync(value: value, field: field, stepper: stepper)
         return stack
     }
@@ -566,13 +707,10 @@ private struct MIDIValueStepper: NSViewRepresentable {
         sync(value: value, field: field, stepper: stepper)
     }
 
-    func makeCoordinator() -> Coordinator {
-        Coordinator(parent: self)
-    }
+    func makeCoordinator() -> Coordinator { Coordinator(parent: self) }
 
     private func makeField(coordinator: Coordinator) -> NSTextField {
         let field = NSTextField()
-        field.translatesAutoresizingMaskIntoConstraints = false
         field.isBordered = true
         field.isBezeled = true
         field.bezelStyle = .roundedBezel
@@ -580,13 +718,12 @@ private struct MIDIValueStepper: NSViewRepresentable {
         field.font = NSFont.monospacedDigitSystemFont(ofSize: NSFont.smallSystemFontSize, weight: .regular)
         field.alignment = .right
         field.delegate = coordinator
-        field.widthAnchor.constraint(equalToConstant: 48).isActive = true
+        field.widthAnchor.constraint(equalToConstant: 40).isActive = true
         return field
     }
 
     private func makeStepper(coordinator: Coordinator) -> NSStepper {
         let stepper = NSStepper()
-        stepper.translatesAutoresizingMaskIntoConstraints = false
         stepper.controlSize = .small
         stepper.minValue = Double(range.lowerBound)
         stepper.maxValue = Double(range.upperBound)
@@ -597,12 +734,8 @@ private struct MIDIValueStepper: NSViewRepresentable {
 
     private func sync(value: Int, field: NSTextField, stepper: NSStepper) {
         let clamped = min(range.upperBound, max(range.lowerBound, value))
-        if field.integerValue != clamped {
-            field.integerValue = clamped
-        }
-        if stepper.integerValue != clamped {
-            stepper.integerValue = clamped
-        }
+        if field.integerValue != clamped { field.integerValue = clamped }
+        if stepper.integerValue != clamped { stepper.integerValue = clamped }
     }
 
     final class Coordinator: NSObject, NSTextFieldDelegate {
@@ -610,9 +743,7 @@ private struct MIDIValueStepper: NSViewRepresentable {
         weak var field: NSTextField?
         weak var stepper: NSStepper?
 
-        init(parent: MIDIValueStepper) {
-            self.parent = parent
-        }
+        init(parent: MIDIValueStepper) { self.parent = parent }
 
         @objc func stepperChanged(_ sender: NSStepper) {
             let clamped = min(parent.range.upperBound, max(parent.range.lowerBound, sender.integerValue))

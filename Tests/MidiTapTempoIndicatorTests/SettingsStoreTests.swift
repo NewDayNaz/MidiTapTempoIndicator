@@ -18,18 +18,35 @@ final class SettingsStoreTests: XCTestCase {
 
     func testDefaultTapMapping() {
         let store = SettingsStore(defaults: defaults)
-        XCTAssertEqual(store.tapMapping, .default)
+        XCTAssertEqual(store.tapInput.note, MIDIMapping.default.note)
+        XCTAssertEqual(store.ledOutputs.count, 1)
         XCTAssertTrue(store.blinkEnabled)
         XCTAssertEqual(store.controllerIdleTimeout, SettingsStore.defaultControllerIdleTimeout)
+        XCTAssertEqual(store.beatSubdivision, .quarter)
     }
 
-    func testPersistsTapMapping() {
+    func testMigratesLegacyTapMapping() {
+        let legacy = MIDIMapping(kind: .controlChange, note: 41, velocity: 127, channel: 0)
+        defaults.set(try! JSONEncoder().encode(legacy), forKey: "tapMapping")
+        defaults.set(2, forKey: "midiChannel")
+
         let store = SettingsStore(defaults: defaults)
-        store.tapMapping = MIDIMapping(kind: .controlChange, note: 41, velocity: 127)
+        XCTAssertEqual(store.tapInput.note, 41)
+        XCTAssertEqual(store.tapInput.channel, 2)
+        XCTAssertEqual(store.ledOutputs.count, 1)
+        XCTAssertEqual(store.ledOutputs[0].note, 41)
+    }
+
+    func testPersistsTapInputAndLEDOutputs() {
+        let store = SettingsStore(defaults: defaults)
+        store.tapInput = MIDIMapping(kind: .controlChange, note: 41, velocity: 127, channel: 3)
+        store.addLEDOutput()
+        XCTAssertEqual(store.ledOutputs.count, 2)
 
         let reloaded = SettingsStore(defaults: defaults)
-        XCTAssertEqual(reloaded.tapMapping.kind, .controlChange)
-        XCTAssertEqual(reloaded.tapMapping.note, 41)
+        XCTAssertEqual(reloaded.tapInput.note, 41)
+        XCTAssertEqual(reloaded.tapInput.channel, 3)
+        XCTAssertEqual(reloaded.ledOutputs.count, 2)
     }
 
     func testClampsControllerIdleTimeout() {
@@ -44,22 +61,52 @@ final class SettingsStoreTests: XCTestCase {
         XCTAssertEqual(store.controllerIdleTimeoutSeconds, 300, accuracy: 0.001)
     }
 
-    func testClampsBPMRangeOnLoad() {
-        defaults.set(10.0, forKey: "minBPM")
-        defaults.set(400.0, forKey: "maxBPM")
+    func testExportImportRoundTrip() throws {
         let store = SettingsStore(defaults: defaults)
-        XCTAssertEqual(store.minBPM, SettingsStore.bpmRange.lowerBound)
-        XCTAssertEqual(store.maxBPM, SettingsStore.bpmRange.upperBound)
+        store.lastBPM = 118
+        store.beatSubdivision = .eighth
+        store.tapInput = MIDIMapping(kind: .controlChange, note: 50, velocity: 100, channel: 1)
+
+        let data = try store.exportSettingsData()
+
+        let otherDefaults = UserDefaults(suiteName: "MidiTapTempoIndicatorTests.import.\(UUID().uuidString)")!
+        let other = SettingsStore(defaults: otherDefaults)
+        try other.importSettingsData(data)
+
+        XCTAssertEqual(other.lastBPM, 118)
+        XCTAssertEqual(other.beatSubdivision, .eighth)
+        XCTAssertEqual(other.tapInput.note, 50)
+        XCTAssertEqual(other.tapInput.channel, 1)
+        otherDefaults.removePersistentDomain(forName: otherDefaults.suiteName!)
+    }
+
+    func testUseSameDeviceMatchesByName() {
+        let store = SettingsStore(defaults: defaults)
+        store.selectedSourceUniqueID = 1
+        let sources = [MIDIEndpointInfo(uniqueID: 1, name: "Controller")]
+        let destinations = [MIDIEndpointInfo(uniqueID: 99, name: "Controller")]
+        store.useSameDeviceForInputAndOutput(sources: sources, destinations: destinations)
+        XCTAssertEqual(store.selectedDestinationUniqueID, 99)
     }
 }
 
 final class MIDIMappingTests: XCTestCase {
-    func testMatchesPressIgnoresZero() {
-        let mapping = MIDIMapping(kind: .controlChange, note: 46, velocity: 127)
-        XCTAssertTrue(mapping.matchesPress(kind: .controlChange, number: 46, value: 127))
-        XCTAssertTrue(mapping.matchesPress(kind: .controlChange, number: 46, value: 1))
-        XCTAssertFalse(mapping.matchesPress(kind: .controlChange, number: 46, value: 0))
-        XCTAssertFalse(mapping.matchesPress(kind: .controlChange, number: 45, value: 127))
+    func testMatchesPressRequiresChannel() {
+        let mapping = MIDIMapping(kind: .controlChange, note: 46, velocity: 127, channel: 1)
+        XCTAssertTrue(mapping.matchesPress(kind: .controlChange, number: 46, value: 127, channel: 1))
+        XCTAssertFalse(mapping.matchesPress(kind: .controlChange, number: 46, value: 127, channel: 0))
+        XCTAssertFalse(mapping.matchesPress(kind: .controlChange, number: 46, value: 0, channel: 1))
+    }
+}
+
+final class TempoStateTests: XCTestCase {
+    func testNudgeClampsToRange() {
+        let state = TempoState()
+        state.currentBPM = 240
+        state.adjustBPM(by: 5, minBPM: 40, maxBPM: 240)
+        XCTAssertEqual(state.currentBPM, 240)
+        state.adjustBPM(by: -1, minBPM: 40, maxBPM: 240)
+        XCTAssertEqual(state.currentBPM, 239)
     }
 }
 

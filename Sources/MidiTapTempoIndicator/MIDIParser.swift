@@ -1,8 +1,8 @@
 import Foundation
 
 enum MIDIParsedMessage: Equatable {
-    case noteOn(note: UInt8, velocity: UInt8)
-    case controlChange(controller: UInt8, value: UInt8)
+    case noteOn(channel: UInt8, note: UInt8, velocity: UInt8)
+    case controlChange(channel: UInt8, controller: UInt8, value: UInt8)
 }
 
 enum MIDIParser {
@@ -47,16 +47,17 @@ enum MIDIParser {
             }
 
             let messageType = status & 0xF0
+            let channel = status & 0x0F
             switch messageType {
             case 0x90:
                 guard index + 1 < bytes.count else { return messages }
-                messages.append(.noteOn(note: byte, velocity: bytes[index + 1]))
+                messages.append(.noteOn(channel: channel, note: byte, velocity: bytes[index + 1]))
                 index += 2
             case 0x80:
                 index = min(index + 2, bytes.count)
             case 0xB0:
                 guard index + 1 < bytes.count else { return messages }
-                messages.append(.controlChange(controller: byte, value: bytes[index + 1]))
+                messages.append(.controlChange(channel: channel, controller: byte, value: bytes[index + 1]))
                 index += 2
             case 0xE0:
                 index = min(index + 2, bytes.count)

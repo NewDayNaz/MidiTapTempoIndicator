@@ -1,0 +1,160 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    name: Verify release tag
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Run verification
+        run: bash ./scripts/ci-verify.sh
+
+  release:
+    name: Build and publish release
+    needs: verify
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Select Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Resolve version from tag
+        id: version
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          echo "version=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "build_number=${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+
+      - name: Generate release notes
+        id: changelog
+        run: |
+          bash ./scripts/generate-release-notes.sh release-notes.md
+          echo "path=release-notes.md" >> "$GITHUB_OUTPUT"
+
+      - name: Build unsigned app bundle
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          BUILD_NUMBER: ${{ steps.version.outputs.build_number }}
+          SKIP_SIGN: "true"
+        run: ./scripts/build-app.sh
+
+      - name: Detect macOS build architecture
+        id: build_arch
+        run: |
+          BINARY="dist/MidiTapTempoIndicator.app/Contents/MacOS/MidiTapTempoIndicator"
+          if [[ ! -f "$BINARY" ]]; then
+            echo "::error::Built app binary not found at $BINARY"
+            exit 1
+          fi
+
+          ARCHS="$(lipo -archs "$BINARY" 2>/dev/null | xargs)"
+          if [[ -z "$ARCHS" ]]; then
+            echo "::error::Unable to determine binary architecture for $BINARY"
+            exit 1
+          fi
+
+          case "$ARCHS" in
+            "arm64")
+              ARCH_LABEL="arm64"
+              ;;
+            "x86_64")
+              ARCH_LABEL="x86_64"
+              ;;
+            *)
+              ARCH_LABEL="universal"
+              ;;
+          esac
+
+          echo "architectures=${ARCHS}" >> "$GITHUB_OUTPUT"
+          echo "label=${ARCH_LABEL}" >> "$GITHUB_OUTPUT"
+
+      - name: Install Apple signing certificate
+        env:
+          MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          if [[ -z "$MACOS_CERTIFICATE_P12" ]]; then
+            echo "::error::MACOS_CERTIFICATE_P12 secret is not configured. See docs/ci-cd.md."
+            exit 1
+          fi
+
+          CERTIFICATE_PATH="$RUNNER_TEMP/build_certificate.p12"
+          KEYCHAIN_PATH="$RUNNER_TEMP/app-signing.keychain-db"
+
+          echo "$MACOS_CERTIFICATE_P12" | base64 --decode -o "$CERTIFICATE_PATH"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERTIFICATE_PATH" -P "$MACOS_CERTIFICATE_PASSWORD" \
+            -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security list-keychain -d user -s "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s \
+            -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+      - name: Prepare notarization API key
+        env:
+          APP_STORE_CONNECT_API_KEY: ${{ secrets.APP_STORE_CONNECT_API_KEY }}
+        run: |
+          if [[ -z "$APP_STORE_CONNECT_API_KEY" ]]; then
+            echo "::error::App Store Connect API key secrets are not configured. See docs/ci-cd.md."
+            exit 1
+          fi
+
+          echo "$APP_STORE_CONNECT_API_KEY" | base64 --decode -o "$RUNNER_TEMP/AuthKey.p8"
+
+      - name: Sign and notarize
+        id: sign
+        env:
+          MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+          APP_STORE_CONNECT_API_KEY_PATH: ${{ runner.temp }}/AuthKey.p8
+          APP_STORE_CONNECT_API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+          APP_STORE_CONNECT_API_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}
+        run: |
+          if [[ -z "$MACOS_SIGNING_IDENTITY" ]]; then
+            echo "::error::MACOS_SIGNING_IDENTITY secret is not configured."
+            exit 1
+          fi
+          ARCHIVE_PATH="$(bash ./scripts/sign-and-notarize.sh | tee /dev/stderr | sed -n 's/^ARCHIVE_PATH=//p')"
+          if [[ -z "$ARCHIVE_PATH" || ! -f "$ARCHIVE_PATH" ]]; then
+            echo "::error::sign-and-notarize.sh did not produce an archive."
+            exit 1
+          fi
+          echo "archive_path=${ARCHIVE_PATH}" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare release archive
+        id: archive
+        run: |
+          ARCHIVE="MidiTapTempoIndicator-${{ steps.version.outputs.version }}-macos-${{ steps.build_arch.outputs.label }}.zip"
+          cp "${{ steps.sign.outputs.archive_path }}" "dist/${ARCHIVE}"
+          echo "path=dist/${ARCHIVE}" >> "$GITHUB_OUTPUT"
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: MIDI Tap Tempo Indicator v${{ steps.version.outputs.version }}
+          body_path: ${{ steps.changelog.outputs.path }}
+          files: ${{ steps.archive.outputs.path }}
+          fail_on_unmatched_files: true

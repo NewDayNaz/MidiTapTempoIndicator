@@ -6,18 +6,26 @@ final class LEDBlinker {
 
     private var bpm: Double?
     private var enabled = true
+    private var subdivision: BeatSubdivision = .quarter
     private var ledOnValue: UInt8 = SettingsStore.defaultLEDOnValue
     private var ledOffValue: UInt8 = SettingsStore.defaultLEDOffValue
     private var isLit = false
+    private var beatCounter = 0
     private var timer: DispatchSourceTimer?
     private let queue = DispatchQueue(label: "com.newdaynaz.miditaptempoindicator.led", qos: .userInteractive)
 
-    func configure(enabled: Bool, ledOnValue: UInt8, ledOffValue: UInt8) {
+    func configure(
+        enabled: Bool,
+        ledOnValue: UInt8,
+        ledOffValue: UInt8,
+        subdivision: BeatSubdivision
+    ) {
         queue.async { [weak self] in
             guard let self else { return }
             self.enabled = enabled
             self.ledOnValue = ledOnValue
             self.ledOffValue = ledOffValue
+            self.subdivision = subdivision
             if !enabled {
                 self.stopLocked(turnOff: true)
             } else {
@@ -40,7 +48,6 @@ final class LEDBlinker {
         }
     }
 
-    /// Called periodically or on activity changes to stop blink when controller is idle.
     func evaluateActivity() {
         queue.async { [weak self] in
             guard let self else { return }
@@ -53,8 +60,32 @@ final class LEDBlinker {
         }
     }
 
+    /// Pulse all LEDs a few times for hardware verification.
+    func runTestBlink(cycles: Int = 3, halfPeriod: TimeInterval = 0.12) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.stopLocked(turnOff: false)
+            for cycle in 0..<(cycles * 2) {
+                let value = cycle % 2 == 0 ? self.ledOnValue : self.ledOffValue
+                let delay = halfPeriod * Double(cycle)
+                self.queue.asyncAfter(deadline: .now() + delay) { [weak self] in
+                    self?.sendLocked(value)
+                }
+            }
+            let finishDelay = halfPeriod * Double(cycles * 2)
+            self.queue.asyncAfter(deadline: .now() + finishDelay) { [weak self] in
+                guard let self else { return }
+                self.sendLocked(self.ledOffValue)
+                self.isLit = false
+                self.restartTimerLocked()
+            }
+        }
+    }
+
     private func restartTimerLocked() {
         stopLocked(turnOff: false)
+        beatCounter = 0
+        isLit = false
 
         guard enabled,
               let bpm,
@@ -67,7 +98,7 @@ final class LEDBlinker {
             return
         }
 
-        let interval = 60.0 / bpm / 2.0
+        let interval = subdivision.timerInterval(bpm: bpm)
         let timer = DispatchSource.makeTimerSource(queue: queue)
         timer.schedule(deadline: .now(), repeating: interval)
         timer.setEventHandler { [weak self] in
@@ -78,7 +109,7 @@ final class LEDBlinker {
     }
 
     private func tickLocked() {
-        guard enabled, bpm != nil else {
+        guard enabled, let bpm, bpm > 0 else {
             stopLocked(turnOff: true)
             return
         }
@@ -88,8 +119,23 @@ final class LEDBlinker {
             return
         }
 
-        isLit.toggle()
-        sendLocked(isLit ? ledOnValue : ledOffValue)
+        switch subdivision {
+        case .quarter, .eighth:
+            isLit.toggle()
+            sendLocked(isLit ? ledOnValue : ledOffValue)
+        case .downbeat:
+            // One short on-pulse at the start of each 4-beat bar; off for the other beats.
+            if beatCounter % 4 == 0 {
+                sendLocked(ledOnValue)
+                let offDelay = min(0.08, subdivision.timerInterval(bpm: bpm) * 0.35)
+                queue.asyncAfter(deadline: .now() + offDelay) { [weak self] in
+                    self?.sendLocked(self?.ledOffValue ?? 0)
+                }
+            } else {
+                sendLocked(ledOffValue)
+            }
+            beatCounter += 1
+        }
     }
 
     private func stopLocked(turnOff: Bool) {
@@ -98,6 +144,7 @@ final class LEDBlinker {
         if turnOff {
             sendLocked(ledOffValue)
             isLit = false
+            beatCounter = 0
         }
     }
 

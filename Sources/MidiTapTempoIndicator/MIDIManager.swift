@@ -8,14 +8,20 @@ final class MIDIManager: ObservableObject {
     @Published private(set) var setupError: String?
     @Published private(set) var inputConnectionStatus: String?
     @Published private(set) var outputConnectionStatus: String?
-    @Published var isLearning = false
+    @Published private(set) var inputConnected = false
+    @Published private(set) var outputConnected = false
+    @Published private(set) var deviceWarningMessage: String?
+    @Published var learningTarget: LearnTarget?
     @Published var lastLearnedMessage: String?
     @Published private(set) var lastReceivedMessage: String?
 
     var onControllerActivity: (() -> Void)?
     var onTapPress: (() -> Void)?
 
+    var isLearning: Bool { learningTarget != nil }
+
     private let settingsStore: SettingsStore
+    private let echoFilter = EchoFilter()
     private var client = MIDIClientRef()
     private var inputPort = MIDIPortRef()
     private var outputPort = MIDIPortRef()
@@ -92,14 +98,25 @@ final class MIDIManager: ObservableObject {
         updateConnectionStatus()
     }
 
-    func beginLearning() {
-        isLearning = true
-        lastLearnedMessage = "Press the tap tempo button on your controller…"
+    func beginLearning(_ target: LearnTarget) {
+        learningTarget = target
+        switch target {
+        case .tapInput:
+            lastLearnedMessage = "Press the tap tempo button on your controller…"
+        case .ledOutput:
+            lastLearnedMessage = "Press the control whose LED should blink…"
+        }
     }
 
     func cancelLearning() {
-        isLearning = false
+        learningTarget = nil
         lastLearnedMessage = nil
+    }
+
+    func sendLEDValue(_ value: UInt8) {
+        for mapping in settingsStore.ledOutputs {
+            sendMapping(mapping, value: value)
+        }
     }
 
     func sendControlChange(controller: UInt8, value: UInt8, channel: UInt8) {
@@ -113,6 +130,17 @@ final class MIDIManager: ObservableObject {
         packet.data.2 = value & 0x7F
         var packetList = MIDIPacketList(numPackets: 1, packet: packet)
         MIDISend(outputPort, destinationEndpoint, &packetList)
+        echoFilter.recordSend(channel: channel & 0x0F, controller: controller & 0x7F, value: value & 0x7F)
+    }
+
+    private func sendMapping(_ mapping: MIDIMapping, value: UInt8) {
+        switch mapping.kind {
+        case .controlChange:
+            sendControlChange(controller: mapping.note, value: value, channel: mapping.channel)
+        case .noteOn:
+            // Drive LED via CC using the same number — common for pad/button controllers.
+            sendControlChange(controller: mapping.note, value: value, channel: mapping.channel)
+        }
     }
 
     private func setupClient() {
@@ -206,13 +234,18 @@ final class MIDIManager: ObservableObject {
         guard setupError == nil else {
             inputConnectionStatus = nil
             outputConnectionStatus = nil
+            inputConnected = false
+            outputConnected = false
+            deviceWarningMessage = setupError
             return
         }
 
+        inputConnected = false
         if let selectedID = settingsStore.selectedSourceUniqueID {
             if connectedSourceID == selectedID,
                let source = sources.first(where: { $0.uniqueID == selectedID }) {
                 inputConnectionStatus = "Listening to \(source.name)."
+                inputConnected = true
             } else if let source = sources.first(where: { $0.uniqueID == selectedID }) {
                 inputConnectionStatus = "\(source.name) is unavailable. Refresh devices or choose another input."
             } else {
@@ -222,10 +255,12 @@ final class MIDIManager: ObservableObject {
             inputConnectionStatus = sources.isEmpty ? "No MIDI inputs found." : "No MIDI input selected."
         }
 
+        outputConnected = false
         if let selectedID = settingsStore.selectedDestinationUniqueID {
             if connectedDestinationID == selectedID,
                let destination = destinations.first(where: { $0.uniqueID == selectedID }) {
                 outputConnectionStatus = "Sending LEDs to \(destination.name)."
+                outputConnected = true
             } else if let destination = destinations.first(where: { $0.uniqueID == selectedID }) {
                 outputConnectionStatus = "\(destination.name) is unavailable. Refresh devices or choose another output."
             } else {
@@ -234,51 +269,77 @@ final class MIDIManager: ObservableObject {
         } else {
             outputConnectionStatus = destinations.isEmpty ? "No MIDI outputs found." : "No MIDI output selected."
         }
+
+        if !inputConnected && settingsStore.selectedSourceUniqueID != nil {
+            deviceWarningMessage = "MIDI input disconnected"
+        } else if !outputConnected && settingsStore.selectedDestinationUniqueID != nil {
+            deviceWarningMessage = "MIDI output disconnected"
+        } else {
+            deviceWarningMessage = nil
+        }
     }
 
     private func handleMessages(_ messages: [MIDIParsedMessage]) {
-        guard !messages.isEmpty else { return }
+        let filtered = messages.filter { message in
+            switch message {
+            case let .controlChange(channel, controller, value):
+                return !echoFilter.shouldIgnore(channel: channel, controller: controller, value: value)
+            case let .noteOn(channel, note, velocity):
+                return !echoFilter.shouldIgnoreNote(channel: channel, note: note, velocity: velocity)
+            }
+        }
+        guard !filtered.isEmpty else { return }
 
         onControllerActivity?()
 
-        for message in messages {
+        for message in filtered {
             switch message {
-            case let .noteOn(note, velocity):
-                handleNoteOn(note: note, velocity: velocity)
-            case let .controlChange(controller, value):
-                handleControlChange(controller: controller, value: value)
+            case let .noteOn(channel, note, velocity):
+                handleNoteOn(channel: channel, note: note, velocity: velocity)
+            case let .controlChange(channel, controller, value):
+                handleControlChange(channel: channel, controller: controller, value: value)
             }
         }
     }
 
-    private func handleNoteOn(note: UInt8, velocity: UInt8) {
-        lastReceivedMessage = "Note \(note) (\(MIDIMapping(kind: .noteOn, note: note, velocity: velocity).noteLabel)), value \(velocity)"
+    private func handleNoteOn(channel: UInt8, note: UInt8, velocity: UInt8) {
+        lastReceivedMessage = "Note \(note) (\(MIDIMapping(kind: .noteOn, note: note, velocity: velocity, channel: channel).noteLabel)) ch\(Int(channel) + 1), value \(velocity)"
 
-        if isLearning, velocity > 0 {
-            settingsStore.tapMapping = MIDIMapping(kind: .noteOn, note: note, velocity: velocity)
-            lastLearnedMessage = "Learned \(settingsStore.tapMapping.noteLabel), value \(velocity)"
-            isLearning = false
+        if let learningTarget, velocity > 0 {
+            applyLearned(MIDIMapping(kind: .noteOn, note: note, velocity: velocity, channel: channel), to: learningTarget)
             return
         }
 
-        if settingsStore.tapMapping.matchesPress(kind: .noteOn, number: note, value: velocity) {
+        if settingsStore.tapInput.matchesPress(kind: .noteOn, number: note, value: velocity, channel: channel) {
             onTapPress?()
         }
     }
 
-    private func handleControlChange(controller: UInt8, value: UInt8) {
-        lastReceivedMessage = "CC \(controller), value \(value)"
+    private func handleControlChange(channel: UInt8, controller: UInt8, value: UInt8) {
+        lastReceivedMessage = "CC \(controller) ch\(Int(channel) + 1), value \(value)"
 
-        if isLearning, value > 0 {
-            settingsStore.tapMapping = MIDIMapping(kind: .controlChange, note: controller, velocity: value)
-            lastLearnedMessage = "Learned CC \(controller), value \(value)"
-            isLearning = false
+        if let learningTarget, value > 0 {
+            applyLearned(MIDIMapping(kind: .controlChange, note: controller, velocity: value, channel: channel), to: learningTarget)
             return
         }
 
-        if settingsStore.tapMapping.matchesPress(kind: .controlChange, number: controller, value: value) {
+        if settingsStore.tapInput.matchesPress(kind: .controlChange, number: controller, value: value, channel: channel) {
             onTapPress?()
         }
+    }
+
+    private func applyLearned(_ mapping: MIDIMapping, to target: LearnTarget) {
+        switch target {
+        case .tapInput:
+            settingsStore.tapInput = mapping
+            lastLearnedMessage = "Learned tap \(mapping.summaryLabel), value \(mapping.velocity)"
+        case let .ledOutput(id):
+            var updated = mapping
+            updated.id = id
+            settingsStore.updateLEDOutput(updated)
+            lastLearnedMessage = "Learned LED \(mapping.summaryLabel), value \(mapping.velocity)"
+        }
+        learningTarget = nil
     }
 
     private static func extractMessages(from packetList: UnsafePointer<MIDIPacketList>) -> [MIDIParsedMessage] {

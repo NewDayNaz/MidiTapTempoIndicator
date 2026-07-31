@@ -2,21 +2,21 @@ import XCTest
 @testable import MidiTapTempoIndicator
 
 final class MIDIParserTests: XCTestCase {
-    func testNoteOnMessage() {
-        let messages = MIDIParser.parse([0x90, 60, 127])
-        XCTAssertEqual(messages, [.noteOn(note: 60, velocity: 127)])
+    func testNoteOnMessageIncludesChannel() {
+        let messages = MIDIParser.parse([0x91, 60, 127])
+        XCTAssertEqual(messages, [.noteOn(channel: 1, note: 60, velocity: 127)])
     }
 
-    func testControlChangeMessage() {
+    func testControlChangeMessageIncludesChannel() {
         let messages = MIDIParser.parse([0xB0, 46, 127])
-        XCTAssertEqual(messages, [.controlChange(controller: 46, value: 127)])
+        XCTAssertEqual(messages, [.controlChange(channel: 0, controller: 46, value: 127)])
     }
 
     func testRunningStatusControlChange() {
-        let messages = MIDIParser.parse([0xB0, 1, 0, 2, 64])
+        let messages = MIDIParser.parse([0xB2, 1, 0, 2, 64])
         XCTAssertEqual(messages, [
-            .controlChange(controller: 1, value: 0),
-            .controlChange(controller: 2, value: 64),
+            .controlChange(channel: 2, controller: 1, value: 0),
+            .controlChange(channel: 2, controller: 2, value: 64),
         ])
     }
 
@@ -27,6 +27,6 @@ final class MIDIParserTests: XCTestCase {
 
     func testSysExIsSkipped() {
         let messages = MIDIParser.parse([0xF0, 0x7E, 0x7F, 0xF7, 0x90, 64, 127])
-        XCTAssertEqual(messages, [.noteOn(note: 64, velocity: 127)])
+        XCTAssertEqual(messages, [.noteOn(channel: 0, note: 64, velocity: 127)])
     }
 }
